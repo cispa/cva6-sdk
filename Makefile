@@ -11,8 +11,31 @@ CC          := $(TOOLCHAIN_PREFIX)gcc
 OBJCOPY     := $(TOOLCHAIN_PREFIX)objcopy
 MKIMAGE     := u-boot/tools/mkimage
 
-NR_CORES := $(shell nproc)
 
+ifeq ($(BOARD), nexys_video)
+DRAM_SIZE_64 ?= 0x20000000 #512MB
+DRAM_SIZE_32 ?= 0x08000000 #128MB
+CLOCK_FREQUENCY ?= 25000000 #25MHz
+HALF_CLOCK_FREQUENCY ?= 12500000 #12.5MHz
+UART_BITRATE ?= 57600
+HAS_ETHERNET ?= 0
+else
+DRAM_SIZE_64 ?= 0x40000000 #1GB
+DRAM_SIZE_32 ?= 0x08000000 #128MB
+CLOCK_FREQUENCY ?= 50000000 #50MHz
+HALF_CLOCK_FREQUENCY ?= 25000000 #25MHz
+UART_BITRATE ?= 115200
+HAS_ETHERNET ?= 1
+endif
+
+ifeq ($(HAS_ETHERNET), 1)
+	SED_DELETE_OPT = -e "/DELETE_ETH_XLNX/d"
+else
+SED_DELETE_OPT =
+endif
+
+NR_CORES := $(shell nproc)
+SED = sed
 # SBI options
 PLATFORM := fpga/ariane
 FW_FDT_PATH ?=
@@ -72,8 +95,16 @@ tests: install-dir $(CC)
 	make install;\
 	cd $(ROOT)
 
-$(CC): $(buildroot_defconfig) $(linux_defconfig) $(busybox_defconfig)
+scripts/ssh_custom:
+	ssh-keygen -t ed25519 -q -N "" -f $@
+
+rootfs/root/.ssh/authorized_keys: scripts/ssh_custom
+	cat scripts/ssh_custom.pub >> $@
+
+buildroot/.config:  $(buildroot_defconfig) $(linux_defconfig) $(busybox_defconfig) rootfs/root/.ssh/authorized_keys
 	make -C buildroot defconfig BR2_DEFCONFIG=../$(buildroot_defconfig)
+
+$(CC): $(buildroot_defconfig) $(linux_defconfig) $(busybox_defconfig) buildroot/.config
 	make -C buildroot host-gcc-final $(buildroot-mk)
 
 all: $(CC) isa-sim
@@ -107,12 +138,29 @@ $(RISCV)/u-boot.bin: u-boot/u-boot.bin
 	mkdir -p $(RISCV)
 	cp $< $@
 
-$(MKIMAGE) u-boot/u-boot.bin: $(CC)
+u-boot/.uboot_config_modded_$(XLEN): xlnx_patches/0002_uboot_adapt_config_$(XLEN).patch
+	cd u-boot && git apply ../xlnx_patches/0002_uboot_adapt_config_$(XLEN).patch && git apply ../xlnx_patches/0003_uboot_disable_dcache_in_xemac.patch && cd ..
+	touch u-boot/.uboot_config_modded_$(XLEN)
+	
+u-boot/arch/riscv/dts/cv64a_genesysII_modded.dts: devicetree/cv64a6.dts.in
+	$(SED) -e "s/DRAM_SIZE_64/$(DRAM_SIZE_64)/g" \
+	       -e "s/DRAM_SIZE_32/$(DRAM_SIZE_32)/g" \
+	       -e "s/HALF_CLOCK_FREQUENCY/$(HALF_CLOCK_FREQUENCY)/g" \
+	       -e "s/CLOCK_FREQUENCY/$(CLOCK_FREQUENCY)/g" \
+	       -e "s/UART_BITRATE/$(UART_BITRATE)/g" \
+	       $(SED_DELETE_OPT) $< > $@
+	cat $@
+
+$(MKIMAGE) u-boot/u-boot.bin: $(CC) u-boot/.uboot_config_modded_$(XLEN) u-boot/arch/riscv/dts/cv64a_genesysII_modded.dts
 	make -C u-boot openhwgroup_cv$(XLEN)a6_genesysII_defconfig
 	make -C u-boot CROSS_COMPILE=$(TOOLCHAIN_PREFIX)
 
+opensbi/.opensbi_config_modded_$(XLEN): xlnx_patches/0001_opensbi_adapt_num_sources_$(XLEN).patch
+	cd opensbi && git apply ../xlnx_patches/0001_opensbi_adapt_num_sources_$(XLEN).patch && cd ..
+	touch opensbi/.opensbi_config_modded_$(XLEN)
+
 # OpenSBI with u-boot as payload
-$(RISCV)/fw_payload.bin: $(RISCV)/u-boot.bin
+$(RISCV)/fw_payload.bin: $(RISCV)/u-boot.bin opensbi/.opensbi_config_modded_$(XLEN)
 	make -C opensbi FW_PAYLOAD_PATH=$< $(sbi-mk)
 	cp opensbi/build/platform/$(PLATFORM)/firmware/fw_payload.elf $(RISCV)/fw_payload.elf
 	cp opensbi/build/platform/$(PLATFORM)/firmware/fw_payload.bin $(RISCV)/fw_payload.bin
@@ -131,16 +179,20 @@ FWPAYLOAD_SECTORSIZE = $(shell ls -l --block-size=512 $(RISCV)/fw_payload.bin | 
 FWPAYLOAD_SECTOREND = $(shell echo $(FWPAYLOAD_SECTORSTART)+$(FWPAYLOAD_SECTORSIZE) | bc)
 SDDEVICE_PART1 = $(shell lsblk $(SDDEVICE) -no PATH | head -2 | tail -1)
 SDDEVICE_PART2 = $(shell lsblk $(SDDEVICE) -no PATH | head -3 | tail -1)
+
 # Always flash uImage at 512M, easier for u-boot boot command
 UIMAGE_SECTORSTART := 512M
 flash-sdcard: format-sd
 	dd if=$(RISCV)/fw_payload.bin of=$(SDDEVICE_PART1) status=progress oflag=sync bs=1M
-	dd if=$(RISCV)/uImage         of=$(SDDEVICE_PART2) status=progress oflag=sync bs=1M
+	$(eval SDDEVICE_MOUNTPOINT := $(shell mktemp -d))
+	mkfs.vfat -F 32 $(SDDEVICE_PART2)
+	mount $(SDDEVICE_PART2) $(SDDEVICE_MOUNTPOINT)
+	cp -v $(RISCV)/uImage $(SDDEVICE_MOUNTPOINT)
+	umount $(SDDEVICE_MOUNTPOINT)
 
 format-sd: $(SDDEVICE)
 	@test -n "$(SDDEVICE)" || (echo 'SDDEVICE must be set, Ex: make flash-sdcard SDDEVICE=/dev/sdc' && exit 1)
-	sgdisk --clear -g --new=1:$(FWPAYLOAD_SECTORSTART):$(FWPAYLOAD_SECTOREND) --new=2:$(UIMAGE_SECTORSTART):0 --typecode=1:3000 --typecode=2:8300 $(SDDEVICE)
-
+	sgdisk --clear -g --new=1:$(FWPAYLOAD_SECTORSTART):$(FWPAYLOAD_SECTOREND) --new=2:$(UIMAGE_SECTORSTART):0 --typecode=1:3000 --typecode=2:0700 $(SDDEVICE)
 # specific recipes
 gcc: $(CC)
 vmlinux: $(RISCV)/vmlinux

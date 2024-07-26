@@ -9,6 +9,10 @@ start() {
 	ifconfig eth0 hw ether 00:18:3E:02:E3:7F
 	chown root:root /etc/ssh/ssh_host_*
 	chmod 600 /etc/ssh/ssh_host_*key
+	chown root:root /root/.ssh/authorized_keys
+
+	echo "Starting eth0 interface"
+	ifup eth0
 }
 stop() {
 	echo "OK"

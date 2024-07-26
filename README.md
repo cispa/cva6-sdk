@@ -9,11 +9,13 @@ Included tools:
 * [u-boot](https://github.com/openhwgroup/u-boot/)
 * [opensbi](https://github.com/riscv/opensbi/), the open-source reference implementation of the RISC-V Supervisor Binary Interface (SBI)
 
+As of now, the SDK has been designed and tested for the **Digilent Genesys 2** FPGA board. To implement and test SDK for other boards in this repository, you can volunteer to create and drive a new project at the OpenHW Group.
+
 ## Quickstart
 
 Requirements Ubuntu:
 ```console
-$ sudo apt-get install autoconf automake autotools-dev curl libmpc-dev libmpfr-dev libgmp-dev libusb-1.0-0-dev gawk build-essential bison flex texinfo gperf libtool patchutils bc zlib1g-dev device-tree-compiler pkg-config libexpat-dev
+$ sudo apt-get install autoconf automake autotools-dev curl libmpc-dev libmpfr-dev libgmp-dev libusb-1.0-0-dev gawk build-essential bison flex texinfo gperf libtool patchutils bc zlib1g-dev device-tree-compiler pkg-config libexpat-dev rsync dosfstools
 ```
 
 Requirements Fedora:
@@ -122,4 +124,13 @@ And build the image:
 ```
 $ cd ..
 $ sudo docker run -it -v `pwd`:/repo -w /repo -u $(id -u ${USER}):$(id -g ${USER}) ghcr.io/pulp-platform/ariane-sdk
+```
+
+# Ethernet Notes
+The u-boot image is configured to do a TFTP boot by default. Use the `scripts/start-tftp.sh` script to run dnsmasq in TFTP mode accordingly. The script requires envsubst and dnsmasq.
+The IP address and interface default to 10.10.10.1/24 and ens19, respectively.
+
+In order to boot from SD instead, run the following command in u-boot:
+```sh
+    mmc info; fatload mmc 0:2 90000000 uImage; setenv fdt_high xffffffffffffffff; bootm 90000000 - $(fdtcontroladdr)
 ```

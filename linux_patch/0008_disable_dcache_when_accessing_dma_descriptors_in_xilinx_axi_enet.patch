@@ -1,0 +1,139 @@
+--- a/drivers/net/ethernet/xilinx/xilinx_axienet_main.c	2024-05-23 12:38:20.861119272 +0200
++++ b/drivers/net/ethernet/xilinx/xilinx_axienet_main.c	2024-05-23 12:38:30.765194509 +0200
+@@ -53,6 +53,10 @@
+ 
+ #define AXIENET_REGS_N		40
+ 
++#define CV64A6_DISABLE_DCACHE {__asm__ volatile("csrwi 0x7C1, 0x00");}
++#define CV64A6_ENABLE_DCACHE {__asm__ volatile("csrwi 0x7C1, 0x01");}
++
++
+ /* Match table for of_platform binding */
+ static const struct of_device_id axienet_of_match[] = {
+ 	{ .compatible = "xlnx,axi-ethernet-1.00.a", },
+@@ -188,14 +192,18 @@
+ 	int i;
+ 	struct axienet_local *lp = netdev_priv(ndev);
+ 
++	CV64A6_DISABLE_DCACHE;
++
+ 	/* If we end up here, tx_bd_v must have been DMA allocated. */
+ 	dma_free_coherent(ndev->dev.parent,
+ 			  sizeof(*lp->tx_bd_v) * lp->tx_bd_num,
+ 			  lp->tx_bd_v,
+ 			  lp->tx_bd_p);
+ 
+-	if (!lp->rx_bd_v)
++	if (!lp->rx_bd_v){
++		CV64A6_ENABLE_DCACHE;
+ 		return;
++	}
+ 
+ 	for (i = 0; i < lp->rx_bd_num; i++) {
+ 		dma_addr_t phys;
+@@ -223,6 +231,8 @@
+ 			  sizeof(*lp->rx_bd_v) * lp->rx_bd_num,
+ 			  lp->rx_bd_v,
+ 			  lp->rx_bd_p);
++	
++	CV64A6_ENABLE_DCACHE;
+ }
+ 
+ /**
+@@ -260,6 +270,8 @@
+ 	if (!lp->rx_bd_v)
+ 		goto out;
+ 
++	CV64A6_DISABLE_DCACHE;
++
+ 	for (i = 0; i < lp->tx_bd_num; i++) {
+ 		dma_addr_t addr = lp->tx_bd_p +
+ 				  sizeof(*lp->tx_bd_v) *
+@@ -340,8 +352,11 @@
+ 	axienet_dma_out32(lp, XAXIDMA_TX_CR_OFFSET,
+ 			  cr | XAXIDMA_CR_RUNSTOP_MASK);
+ 
++	CV64A6_ENABLE_DCACHE;
++
+ 	return 0;
+ out:
++	CV64A6_ENABLE_DCACHE;
+ 	axienet_dma_bd_release(ndev);
+ 	return -ENOMEM;
+ }
+@@ -827,6 +842,8 @@
+ 	struct sk_buff *skb, *new_skb;
+ 	struct axidma_bd *cur_p;
+ 
++	CV64A6_DISABLE_DCACHE;
++
+ 	cur_p = &lp->rx_bd_v[lp->rx_bd_ci];
+ 
+ 	while ((cur_p->status & XAXIDMA_BD_STS_COMPLETE_MASK)) {
+@@ -868,8 +885,10 @@
+ 		packets++;
+ 
+ 		new_skb = netdev_alloc_skb_ip_align(ndev, lp->max_frm_size);
+-		if (!new_skb)
++		if (!new_skb){
++			CV64A6_ENABLE_DCACHE;
+ 			return;
++		}
+ 
+ 		phys = dma_map_single(ndev->dev.parent, new_skb->data,
+ 				      lp->max_frm_size,
+@@ -896,6 +915,8 @@
+ 
+ 	if (tail_p)
+ 		axienet_dma_out_addr(lp, XAXIDMA_RX_TDESC_OFFSET, tail_p);
++
++	CV64A6_ENABLE_DCACHE;
+ }
+ 
+ /**
+@@ -965,14 +986,18 @@
+ 	struct net_device *ndev = _ndev;
+ 	struct axienet_local *lp = netdev_priv(ndev);
+ 
++	CV64A6_DISABLE_DCACHE;
++
+ 	status = axienet_dma_in32(lp, XAXIDMA_RX_SR_OFFSET);
+ 	if (status & (XAXIDMA_IRQ_IOC_MASK | XAXIDMA_IRQ_DELAY_MASK)) {
+ 		axienet_dma_out32(lp, XAXIDMA_RX_SR_OFFSET, status);
+ 		axienet_recv(lp->ndev);
+ 		goto out;
+ 	}
+-	if (!(status & XAXIDMA_IRQ_ALL_MASK))
++	if (!(status & XAXIDMA_IRQ_ALL_MASK)){
++		CV64A6_ENABLE_DCACHE;
+ 		return IRQ_NONE;
++	}
+ 	if (status & XAXIDMA_IRQ_ERROR_MASK) {
+ 		dev_err(&ndev->dev, "DMA Rx error 0x%x\n", status);
+ 		dev_err(&ndev->dev, "Current BD is at: 0x%x%08x\n",
+@@ -995,6 +1020,7 @@
+ 		axienet_dma_out32(lp, XAXIDMA_RX_SR_OFFSET, status);
+ 	}
+ out:
++	CV64A6_ENABLE_DCACHE;
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -1656,6 +1682,8 @@
+ 	axienet_mdio_enable(lp);
+ 	mutex_unlock(&lp->mii_bus->mdio_lock);
+ 
++	CV64A6_DISABLE_DCACHE;
++
+ 	for (i = 0; i < lp->tx_bd_num; i++) {
+ 		cur_p = &lp->tx_bd_v[i];
+ 		if (cur_p->cntrl) {
+@@ -1758,6 +1786,8 @@
+ 	axienet_set_mac_address(ndev, NULL);
+ 	axienet_set_multicast_list(ndev);
+ 	axienet_setoptions(ndev, lp->options);
++
++	CV64A6_ENABLE_DCACHE;
+ }
+ 
+ /**
